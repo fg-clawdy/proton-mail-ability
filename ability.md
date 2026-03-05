@@ -1,18 +1,16 @@
 ---
-name: ProtonMail
-description: Send and receive ProtonMail emails via voice commands. Check inbox, compose and send emails, get notified of new mail, and act on emails from designated senders as voice commands.
+name: ProtonMail Monitor
+description: Background email monitoring for ProtonMail. Polls for new emails, notifies on mail from designated sender, auto-purges old emails. Requires platform IMAP support.
 author: MultiClaw
-version: 1.0.0
+version: 1.1.0
 tags:
   - email
   - protonmail
-  - smtp
   - imap
-  - communication
+  - monitor
+  - background
+  - purge
 triggers:
-  - send proton
-  - send protonmail
-  - proton mail
   - check mail
   - read email
   - check my email
@@ -20,14 +18,8 @@ triggers:
   - new email
   - any mail
   - inbox
-  - compose email
-  - write email
-  - send email
+  - proton mail
 config:
-  smtp_password:
-    type: string
-    required: true
-    description: ProtonMail app password
   proton_email:
     type: string
     required: true
@@ -35,28 +27,46 @@ config:
   designated_sender:
     type: string
     required: false
-    description: Email address whose commands will be acted on
-  interactive_mode:
-    type: boolean
-    default: true
-    description: Interactive prompts vs one-shot
+    description: Email address to monitor and act on
+  poll_interval_minutes:
+    type: integer
+    default: 10
+    description: How often to check for new mail
+  purge_days:
+    type: integer
+    default: 31
+    description: Auto-delete emails older than this many days
   mail_notifications:
     type: boolean
     default: true
     description: Play "you've got mail" chime
 ---
 
-# ProtonMail Ability
+# ProtonMail Monitor Ability
 
-Voice-controlled email via ProtonMail.
+Background email monitoring for ProtonMail.
 
 ## Features
 
-- **Send Email**: Compose and send via SMTP
-- **Check Mail**: Fetch recent emails from IMAP
-- **Notifications**: "You've got mail" chime when new mail arrives
-- **Act on Commands**: Emails from designated sender are parsed as voice commands
+- **Background Daemon**: Polls for new emails at regular intervals
+- **Designated Sender**: Monitor specific sender for command emails
+- **Auto-Purge**: Automatically deletes emails older than X days (default 31)
+- **Voice Notifications**: "You've got mail" when new mail arrives
 
-## Usage
+## Architecture
 
-Say "send proton" to compose, "check mail" to view inbox.
+- `main.py` - Interactive skill (check status)
+- `background.py` - Background daemon for polling
+
+## Requirements
+
+- Platform support for IMAP (currently blocked in sandbox)
+- For production: either IMAP allowed or use ProtonMail HTTP API
+
+## Configuration
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| poll_interval_minutes | 10 | Check frequency |
+| purge_days | 31 | Auto-delete older emails |
+| mail_notifications | true | Play chime |

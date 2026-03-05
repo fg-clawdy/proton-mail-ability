@@ -1,12 +1,19 @@
 """
-Background Daemon for ProtonMail Ability
-Polls for new emails from designated sender at regular intervals
+Background Daemon for ProtonMail Email Monitoring
+
+NOTE: imaplib and smtplib are blocked in OpenHome sandbox.
+This demonstrates the architecture - for production, 
+either:
+1. Platform adds IMAP support, or
+2. Use ProtonMail HTTP API via urllib
+
+Architecture:
+- Polls every N minutes for new emails
+- Notifies on new mail from designated sender  
+- Auto-purges emails older than X days (default 31)
 """
 
 import json
-import os
-import email
-import imaplib
 from datetime import datetime, timedelta
 
 from src.agent.capability import MatchingCapability
@@ -15,17 +22,17 @@ from src.agent.capability_worker import CapabilityWorker
 
 
 class ProtonMailDaemon(MatchingCapability):
-    """Background daemon for passive ProtonMail monitoring."""
+    """Background daemon for ProtonMail monitoring."""
     
     worker: AgentWorker = None
     capability_worker: CapabilityWorker = None
     background_daemon_mode: bool = False
     
     # Configuration
-    smtp_password: str = ""
     proton_email: str = ""
     designated_sender: str = ""
     poll_interval_minutes: int = 10
+    purge_days: int = 31
     mail_notifications: bool = True
     
     # Track processed emails
@@ -43,10 +50,10 @@ class ProtonMailDaemon(MatchingCapability):
         return cls(
             unique_name=data["unique_name"],
             matching_hotwords=data["matching_hotwords"],
-            smtp_password=data.get("smtp_password", ""),
             proton_email=data.get("proton_email", ""),
             designated_sender=data.get("designated_sender", ""),
             poll_interval_minutes=data.get("poll_interval_minutes", 10),
+            purge_days=data.get("purge_days", 31),
             mail_notifications=data.get("mail_notifications", True),
         )
 
@@ -59,170 +66,115 @@ class ProtonMailDaemon(MatchingCapability):
     async def background_loop(self):
         """Continuous background polling loop."""
         self.worker.editor_logging_handler.info(
-            f"ProtonMail daemon started. Polling every {self.poll_interval_minutes} minutes."
+            f"ProtonMail daemon started. Poll: {self.poll_interval_minutes}min, "
+            f"Purge: {self.purge_days} days"
         )
         
-        # Load previously processed UIDs
-        await self._load_processed_uids()
+        # Load state
+        await self._load_state()
         
         try:
             while True:
-                await self._check_for_designated_sender_emails()
+                # Check for new mail (would use IMAP in production)
+                await self._check_mail()
+                
+                # Purge old emails
+                await self._purge_old_emails()
+                
+                # Save state
+                await self._save_state()
+                
                 await self.worker.session_tasks.sleep(self.poll_interval_minutes * 60)
+                
         except Exception as e:
             self.worker.editor_logging_handler.error(f"Daemon error: {e}")
-            await self.capability_worker.speak("Mail daemon encountered an error.")
 
-    async def _check_for_designated_sender_emails(self):
+    async def _check_mail(self):
         """Check for new emails from designated sender."""
         if not self.designated_sender:
             return
         
-        try:
-            emails = await self._fetch_emails(limit=10)
-            
-            for email_data in emails:
-                # Create unique ID for this email
-                email_uid = f"{email_data['from']}:{email_data['subject']}:{email_data['date']}"
-                
-                if email_uid in self.processed_uids:
-                    continue
-                
-                # Check if from designated sender
-                if self.designated_sender.lower() in email_data['from'].lower():
-                    self.worker.editor_logging_handler.info(
-                        f"Command email from {self.designated_sender}"
-                    )
-                    
-                    # Interrupt current output and notify
-                    await self.capability_worker.send_interrupt_signal()
-                    
-                    if self.mail_notifications:
-                        await self.capability_worker.speak("You've got mail!")
-                    
-                    # Process the command
-                    await self._act_on_email(email_data)
-                    
-                    # Mark as processed
-                    self.processed_uids.add(email_uid)
-                    await self._save_processed_uids()
-                    
-        except Exception as e:
-            self.worker.editor_logging_handler.error(f"Error checking emails: {e}")
+        # NOTE: In production, this would use IMAP:
+        # import imaplib
+        # mail = imaplib.IMAP4_SSL('imap.protonmail.com')
+        # mail.login(self.proton_email, password)
+        # ...
+        
+        # For now, log the intended behavior
+        self.worker.editor_logging_handler.info(
+            f"Would check IMAP for emails from {self.designated_sender}"
+        )
+        
+        # Simulated check - in production would fetch real emails
+        # If new email found:
+        #   await self.capability_worker.send_interrupt_signal()
+        #   if self.mail_notifications:
+        #       await self.capability_worker.speak("You've got mail!")
+        #   await self._process_email(email_data)
 
-    async def _act_on_email(self, email_data: dict):
-        """Act on email from designated sender."""
-        email_body = email_data['body'][:1000]
+    async def _purge_old_emails(self):
+        """Purge emails older than purge_days."""
+        self.worker.editor_logging_handler.info(
+            f"Running email purge (older than {self.purge_days} days)"
+        )
+        
+        # NOTE: In production, this would use IMAP to delete:
+        # import imaplib
+        # mail = imaplib.IMAP4_SSL('imap.protonmail.com')
+        # mail.login(...)
+        # mail.select('INBOX')
+        # # Search and delete emails older than purge_days
+        # ...
+        
+        # Calculate cutoff date
+        cutoff = datetime.now() - timedelta(days=self.purge_days)
+        self.worker.editor_logging_handler.info(
+            f"Would purge emails before {cutoff.strftime('%Y-%m-%d')}"
+        )
+
+    async def _process_email(self, email_data: dict):
+        """Process email from designated sender - parse as command."""
+        email_body = email_data.get('body', '')[:1000]
         
         await self.capability_worker.speak("Processing email command...")
         
+        # Parse body as voice command
         action_prompt = (
-            f"User sent this email command:\n"
+            f"Email command from {email_data['from']}:\n"
             f"Subject: {email_data['subject']}\n"
             f"Body: {email_body}\n\n"
-            f"Execute this command. If it asks a question, include the answer."
+            f"Execute this command."
         )
         
-        action_response = self.capability_worker.text_to_text_response(action_prompt)
+        response = self.capability_worker.text_to_text_response(action_prompt)
         
-        await self.capability_worker.speak(f"Done. {action_response}")
+        await self.capability_worker.speak(f"Done. {response}")
         
-        # Auto-reply with result
-        reply_to = self._extract_email_address(email_data['from'])
-        if reply_to:
-            import smtplib
-            from email.mime.text import MIMEText
-            from email.mime.multipart import MIMEMultipart
-            
-            try:
-                msg = MIMEMultipart()
-                msg['From'] = self.proton_email
-                msg['To'] = reply_to
-                msg['Subject'] = f"Re: {email_data['subject']}"
-                msg.attach(MIMEText(action_response, 'plain'))
-                
-                server = smtplib.SMTP('smtp.protonmail.com', 587)
-                server.starttls()
-                server.login(self.proton_email, self.smtp_password)
-                server.sendmail(self.proton_email, reply_to, msg.as_string())
-                server.quit()
-                
-                await self.capability_worker.speak("Reply sent.")
-            except Exception as e:
-                self.worker.editor_logging_handler.error(f"Auto-reply failed: {e}")
-
-    def _extract_email_address(self, from_header: str) -> str:
-        import re
-        match = re.search(r'<(.+?)>|^(.+?)$', from_header)
-        return match.group(1) or match.group(2) if match else ""
-
-    async def _fetch_emails(self, limit: int = 10):
-        """Fetch recent emails via IMAP."""
-        emails = []
+        # Auto-reply (would use SMTP in production)
+        # import smtplib
+        # server = smtplib.SMTP('smtp.protonmail.com', 587)
+        # ...
         
-        try:
-            mail = imaplib.IMAP4_SSL('imap.protonmail.com')
-            mail.login(self.proton_email, self.smtp_password)
-            mail.select('INBOX')
-            
-            since_date = (datetime.now() - timedelta(days=1)).strftime('%d-%b-%Y')
-            status, messages = mail.search(None, f'SINCE {since_date}')
-            
-            if status == 'OK':
-                email_ids = messages[0].split()[-limit:]
-                
-                for email_id in email_ids:
-                    status, msg_data = mail.fetch(email_id, '(RFC822)')
-                    if status == 'OK':
-                        msg = email.message_from_bytes(msg_data[0][1])
-                        
-                        email_info = {
-                            'from': msg.get('From', 'Unknown'),
-                            'subject': msg.get('Subject', 'No Subject'),
-                            'date': msg.get('Date', ''),
-                            'body': self._extract_body(msg)
-                        }
-                        emails.append(email_info)
-            
-            mail.logout()
-            
-        except Exception as e:
-            self.worker.editor_logging_handler.error(f"IMAP error: {e}")
-        
-        return emails
+        self.worker.editor_logging_handler.info(f"Would send auto-reply to {email_data['from']}")
 
-    def _extract_body(self, msg) -> str:
-        if msg.is_multipart():
-            for part in msg.walk():
-                if part.get_content_type() == "text/plain":
-                    return part.get_payload(decode=True).decode('utf-8', errors='ignore')
-        else:
-            return msg.get_payload(decode=True).decode('utf-8', errors='ignore')
-        return ""
-
-    async def _load_processed_uids(self):
-        """Load processed email UIDs from storage."""
-        exists = await self.capability_worker.check_if_file_exists(
-            "protonmail_processed.json"
-        )
+    async def _load_state(self):
+        """Load processed email UIDs."""
+        exists = await self.capability_worker.check_if_file_exists("protonmail_state.json")
         if exists:
-            content = await self.capability_worker.read_file("protonmail_processed.json")
+            content = await self.capability_worker.read_file("protonmail_state.json")
             if content:
-                import json
                 try:
                     data = json.loads(content)
-                    self.processed_uids = set(data.get("uids", []))
+                    self.processed_uids = set(data.get("processed", []))
                 except:
                     pass
 
-    async def _save_processed_uids(self):
+    async def _save_state(self):
         """Save processed email UIDs."""
         import json
-        data = json.dumps({"uids": list(self.processed_uids)})
-        # Keep only last 50 to prevent unbounded growth
+        # Keep last 50
         if len(self.processed_uids) > 50:
             self.processed_uids = set(list(self.processed_uids)[-50:])
-        await self.capability_worker.write_file(
-            "protonmail_processed.json", 
-            json.dumps({"uids": list(self.processed_uids)})
-        )
+        
+        data = json.dumps({"processed": list(self.processed_uids)})
+        await self.capability_worker.write_file("protonmail_state.json", data)
