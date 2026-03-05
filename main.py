@@ -7,9 +7,6 @@ Capabilities:
 - Check/read emails actively
 - "You've got mail" notification on new emails (configurable)
 - Act on email from designated sender (parse body as command, reply if needed)
-
-TODO: Passive polling - requires external scheduler or platform support
-      Currently only supports active "check mail" command
 """
 
 import json
@@ -73,41 +70,67 @@ class ProtonMailCapability(MatchingCapability):
             await self._run_proton_mail()
         except Exception as e:
             self.worker.editor_logging_handler.error(f"ProtonMail ability error: {e}")
-            await self.capability_worker.speak(
-                "I encountered an error with ProtonMail. Let me hand you back."
-            )
+            await self.capability_worker.speak("I encountered an error. Let me hand you back.")
         finally:
             self.capability_worker.resume_normal_flow()
 
     async def _run_proton_mail(self):
-        """Main ability logic - determine action based on user input."""
+        """Main ability logic - read trigger context and route appropriately."""
         
-        # First, check if user wants to send or read email
-        await self.capability_worker.speak(
-            "ProtonMail ready. Do you want to send an email or check for new messages?"
-        )
+        # Read trigger context from conversation history
+        history = self.capability_worker.get_full_message_history()
+        trigger_intent = self._classify_trigger_intent(history)
         
-        user_input = await self.capability_worker.user_response()
-        
-        # Check for exit phrases
-        if self._is_exit(user_input):
-            if await self._confirm_and_exit("exit"):
-                return
-        
-        # Determine action
-        user_lower = user_input.lower()
-        
-        if any(word in user_lower for word in ["send", "write", "compose", "email"]):
-            await self._handle_send_email()
-        elif any(word in user_lower for word in ["check", "read", "new", "messages", "mail", "inbox"]):
-            await self._handle_check_email()
+        # Route based on detected intent
+        if trigger_intent == "send":
+            await self._handle_send_email(from_trigger=True)
+        elif trigger_intent == "check" or trigger_intent == "read":
+            await self._handle_check_email(from_trigger=True)
         else:
-            await self.capability_worker.speak(
-                "I didn't catch that. Say 'send email' to compose a message "
-                "or 'check mail' to see your inbox."
-            )
+            # Default: ask what they want
+            await self.capability_worker.speak("Send email or check mail?")
+            user_input = await self.capability_worker.user_response()
+            
+            if self._is_exit(user_input):
+                if await self._confirm_and_exit("exit"):
+                    return
+            
+            user_lower = user_input.lower()
+            
+            if any(word in user_lower for word in ["send", "write", "compose"]):
+                await self._handle_send_email(from_trigger=False)
+            elif any(word in user_lower for word in ["check", "read", "new", "mail", "inbox"]):
+                await self._handle_check_email(from_trigger=False)
+            else:
+                await self.capability_worker.speak("I didn't catch that. Say send or check.")
 
-    async def _handle_send_email(self):
+    def _classify_trigger_intent(self, history: list) -> str:
+        """Classify intent from trigger context using conversation history."""
+        if not history:
+            return "unknown"
+        
+        # Get last few messages
+        recent = history[-5:] if len(history) > 5 else history
+        
+        # Build trigger text
+        trigger_text = " ".join([
+            msg.get("content", "").lower() 
+            for msg in recent 
+            if msg.get("role") == "user"
+        ])
+        
+        # Classify intent
+        send_keywords = ["send", "write", "compose", "email to", "mail to", "proton"]
+        check_keywords = ["check", "read", "new", "inbox", "do i have", "any mail"]
+        
+        if any(kw in trigger_text for kw in send_keywords):
+            return "send"
+        elif any(kw in trigger_text for kw in check_keywords):
+            return "check"
+        
+        return "unknown"
+
+    async def _handle_send_email(self, from_trigger: bool = False):
         """Handle sending an email - interactive or one-shot mode."""
         
         recipient = ""
@@ -117,7 +140,8 @@ class ProtonMailCapability(MatchingCapability):
         if self.interactive_mode:
             # Interactive mode: prompt for each field with loops
             while True:
-                await self.capability_worker.speak("Who is this email going to?")
+                if not from_trigger:
+                    await self.capability_worker.speak("Who to?")
                 recipient = await self.capability_worker.user_response()
                 
                 if self._is_exit(recipient):
@@ -126,12 +150,12 @@ class ProtonMailCapability(MatchingCapability):
                     continue
                 
                 if "@" not in recipient:
-                    await self.capability_worker.speak("That doesn't look like a valid email. Please try again.")
+                    await self.capability_worker.speak("That doesn't look like an email.")
                     continue
                 break
             
             while True:
-                await self.capability_worker.speak("What is the subject of this email?")
+                await self.capability_worker.speak("Subject?")
                 subject = await self.capability_worker.user_response()
                 
                 if self._is_exit(subject):
@@ -141,7 +165,7 @@ class ProtonMailCapability(MatchingCapability):
                 break
             
             while True:
-                await self.capability_worker.speak("What is the email body?")
+                await self.capability_worker.speak("What's the message?")
                 body = await self.capability_worker.user_response()
                 
                 if self._is_exit(body):
@@ -150,10 +174,8 @@ class ProtonMailCapability(MatchingCapability):
                     continue
                 break
         else:
-            # One-shot mode: get all info at once, then fill in gaps
-            await self.capability_worker.speak(
-                "Please tell me the recipient, subject, and body of your email."
-            )
+            # One-shot mode: get all info at once
+            await self.capability_worker.speak("Recipient, subject, and message?")
             full_input = await self.capability_worker.user_response()
             
             if self._is_exit(full_input):
@@ -162,189 +184,116 @@ class ProtonMailCapability(MatchingCapability):
             
             # Ask for missing details
             while not recipient:
-                await self.capability_worker.speak("Who is this email going to?")
+                await self.capability_worker.speak("Who to?")
                 recipient = await self.capability_worker.user_response()
                 if self._is_exit(recipient):
                     if await self._confirm_and_exit("cancel"):
                         return
                 elif "@" not in recipient:
-                    await self.capability_worker.speak("That doesn't look like a valid email.")
+                    await self.capability_worker.speak("Need a valid email.")
                     recipient = ""
             
             while not subject:
-                await self.capability_worker.speak("What is the subject?")
+                await self.capability_worker.speak("Subject?")
                 subject = await self.capability_worker.user_response()
                 if self._is_exit(subject):
                     if await self._confirm_and_exit("cancel"):
                         return
             
             while not body:
-                await self.capability_worker.speak("What is the message?")
+                await self.capability_worker.speak("Message?")
                 body = await self.capability_worker.user_response()
                 if self._is_exit(body):
                     if await self._confirm_and_exit("cancel"):
                         return
         
-        # Review flow
-        await self.capability_worker.speak(
-            "Would you like to review the details of this email before sending?"
-        )
+        # Review - keep it short
+        await self.capability_worker.speak(f"To: {recipient}. Subject: {subject}. Send?")
         
-        review_response = await self.capability_worker.user_response()
-        
-        if self._is_exit(review_response):
-            if await self._confirm_and_exit("cancel"):
-                return
-        
-        if any(word in review_response.lower() for word in ["yes", "review", "show"]):
-            await self.capability_worker.speak(
-                f"You're sending an email to {recipient}. "
-                f"Subject: {subject}. "
-                f"Body: {body}"
-            )
-        
-        # Confirm send
-        await self.capability_worker.speak("Shall I send this email?")
         confirm = await self.capability_worker.user_response()
         
         if self._is_exit(confirm):
             if await self._confirm_and_exit("cancel"):
                 return
         
-        if any(word in confirm.lower() for word in ["yes", "send", "confirm", "go"]):
+        if any(word in confirm.lower() for word in ["yes", "send", "confirm", "go", "sure"]):
+            await self.capability_worker.speak("Sending...")
             success = await self._send_email(recipient, subject, body)
             if success:
-                await self.capability_worker.speak("Email sent successfully!")
+                await self.capability_worker.speak("Sent!")
             else:
-                await self.capability_worker.speak(
-                    "Sorry, I couldn't send the email. Please check your settings and try again."
-                )
+                await self.capability_worker.speak("Failed. Check settings.")
         else:
-            await self.capability_worker.speak("Email cancelled.")
+            await self.capability_worker.speak("Cancelled.")
 
-    async def _handle_check_email(self):
-        """Handle checking for new emails (active).
+    async def _handle_check_email(self, from_trigger: bool = False):
+        """Handle checking for new emails (active)."""
         
-        Fetches recent emails and:
-        - Plays "You've got mail" chime if notifications enabled and new mail exists
-        - Lists emails and lets user read any of them
-        - If email from designated_sender, acts on it (parses as command, replies if needed)
-        """
-        
-        await self.capability_worker.speak("Checking for new emails...")
+        if not from_trigger:
+            await self.capability_worker.speak("Checking mail...")
+        else:
+            await self.capability_worker.speak("One sec, checking your mail...")
         
         emails = await self._fetch_emails()
         
         if not emails:
-            await self.capability_worker.speak("You have no new emails.")
+            await self.capability_worker.speak("No new mail.")
         else:
-            # Play notification chime if enabled
             if self.mail_notifications:
                 await self.capability_worker.speak("You've got mail!")
             
-            await self.capability_worker.speak(f"You have {len(emails)} new email(s).")
+            await self.capability_worker.speak(f"{len(emails)} new. Want me to read them?")
             
-            # Check for designated sender email (for acting on it)
-            designated_email = None
-            for email_data in emails:
-                if self.designated_sender and self.designated_sender.lower() in email_data['from'].lower():
-                    designated_email = email_data
-                    break
+            response = await self.capability_worker.user_response()
             
-            # If there's an email from designated sender, offer to act on it
-            if designated_email:
-                await self.capability_worker.speak(
-                    f"You have an email from {self.designated_sender}. "
-                    f"Subject: {designated_email['subject']}. "
-                    f"Would you like me to act on this email?"
-                )
-                
-                response = await self.capability_worker.user_response()
-                
-                if any(word in response.lower() for word in ["yes", "act", "do", "sure", "go"]):
-                    await self._act_on_email(designated_email)
-                    return  # _act_on_email handles its own exit flow
+            if self._is_exit(response):
+                if await self._confirm_and_exit("exit"):
+                    return
             
-            # List emails for user to read
-            for i, email_data in enumerate(emails[:5]):
-                await self.capability_worker.speak(
-                    f"Email {i+1}: From {email_data['from']}. Subject: {email_data['subject']}. "
-                    f"Would you like me to read the body?"
-                )
-                
-                response = await self.capability_worker.user_response()
-                
-                if self._is_exit(response):
-                    if await self._confirm_and_exit("exit"):
-                        return
-                
-                if any(word in response.lower() for word in ["yes", "read", "sure"]):
-                    await self.capability_worker.speak(email_data['body'][:500])
+            if any(word in response.lower() for word in ["yes", "sure", "go", "read"]):
+                for i, email_data in enumerate(emails[:3]):
+                    await self.capability_worker.speak(
+                        f"From {email_data['from']}. Subject: {email_data['subject']}."
+                    )
 
     async def _act_on_email(self, email_data: dict):
-        """Act on an email from the designated sender.
+        """Act on an email from the designated sender."""
+        email_body = email_data['body'][:1000]
         
-        Parses the email body as a voice command to the agent.
-        If the agent's response indicates a reply is expected, sends an email reply.
-        """
-        email_body = email_data['body'][:1000]  # Limit for processing
-        email_from = email_data['from']
+        await self.capability_worker.speak("Processing command...")
         
-        await self.capability_worker.speak("Processing email command...")
-        
-        # Parse body as voice command - ask agent what to do
         action_prompt = (
-            f"The user sent this email command:\n"
+            f"User sent this email command:\n"
             f"Subject: {email_data['subject']}\n"
             f"Body: {email_body}\n\n"
-            f"Execute this command as if the user spoke it to you. "
-            f"Respond with what you did. If the command asks a question or expects a response, "
-            f"include that response in your output so I can reply to the email."
+            f"Execute this command. If it asks a question, include the answer."
         )
         
         action_response = self.capability_worker.text_to_text_response(action_prompt)
         
-        # Tell the user what happened
-        await self.capability_worker.speak(f"Email command executed: {action_response}")
+        await self.capability_worker.speak(f"Done. {action_response}")
         
-        # Check if we should reply to the email
-        # Heuristic: if response contains question marks or seems like an answer, reply
-        should_reply = "?" in action_response or any(
-            word in action_response.lower() 
-            for word in ["here's", "here is", "the", "result", "answer", "status", "current"]
-        )
+        # Check if we should reply
+        should_reply = "?" in action_response or len(action_response) > 50
         
         if should_reply:
-            await self.capability_worker.speak(
-                "This command produced a response. Would you like me to reply to the email?"
+            reply_confirm = await self.capability_worker.run_confirmation_loop(
+                "Send reply?"
             )
             
-            reply_confirm = await self.capability_worker.user_response()
-            
-            if any(word in reply_confirm.lower() for word in ["yes", "sure", "go", "do"]):
-                # Extract email address from the "From" field
-                reply_to = self._extract_email_address(email_from)
-                
+            if reply_confirm:
+                reply_to = self._extract_email_address(email_data['from'])
                 if reply_to:
-                    reply_subject = f"Re: {email_data['subject']}"
-                    reply_body = action_response
-                    
-                    success = await self._send_email(reply_to, reply_subject, reply_body)
-                    
-                    if success:
-                        await self.capability_worker.speak("Reply sent!")
-                    else:
-                        await self.capability_worker.speak(
-                            "Sorry, I couldn't send the reply. Check your settings."
-                        )
-                else:
-                    await self.capability_worker.speak(
-                        "I couldn't extract a valid email address to reply to."
+                    success = await self._send_email(
+                        reply_to, 
+                        f"Re: {email_data['subject']}", 
+                        action_response
                     )
+                    await self.capability_worker.speak("Reply sent!" if success else "Reply failed.")
+                else:
+                    await self.capability_worker.speak("Couldn't extract reply address.")
             else:
-                await self.capability_worker.speak("Reply cancelled.")
-        
-        await self.capability_worker.speak("Done processing email.")
+                await self.capability_worker.speak("Reply skipped.")
 
     def _extract_email_address(self, from_header: str) -> str:
         """Extract email address from 'From' header."""
@@ -363,7 +312,6 @@ class ProtonMailCapability(MatchingCapability):
             msg['Subject'] = subject
             msg.attach(MIMEText(body, 'plain'))
             
-            # ProtonMail SMTP settings
             server = smtplib.SMTP('smtp.protonmail.com', 587)
             server.starttls()
             server.login(self.proton_email, self.smtp_password)
@@ -382,12 +330,10 @@ class ProtonMailCapability(MatchingCapability):
         emails = []
         
         try:
-            # ProtonMail IMAP settings
             mail = imaplib.IMAP4_SSL('imap.protonmail.com')
             mail.login(self.proton_email, self.smtp_password)
             mail.select('INBOX')
             
-            # Search for recent emails
             since_date = (datetime.now() - timedelta(days=7)).strftime('%d-%b-%Y')
             status, messages = mail.search(None, f'SINCE {since_date}')
             
@@ -426,37 +372,18 @@ class ProtonMailCapability(MatchingCapability):
 
     def _is_exit(self, user_input: str) -> bool:
         """Check if user wants to exit."""
-        exit_phrases = {"stop", "exit", "quit", "cancel", "goodbye", "done", "never mind", "forget it"}
+        exit_phrases = {"stop", "exit", "quit", "cancel", "goodbye", "done", "never mind"}
         return any(phrase in user_input.lower() for phrase in exit_phrases)
 
     async def _confirm_and_exit(self, action: str = "exit"):
-        """Confirm before exiting. Returns True if confirmed (should exit), False if cancelled."""
-        await self.capability_worker.speak(f"Are you sure you want to {action}?")
-        response = await self.capability_worker.user_response()
+        """Confirm before exiting. Returns True if confirmed."""
+        confirmed = await self.capability_worker.run_confirmation_loop(
+            f"Confirm {action}?"
+        )
         
-        if any(word in response.lower() for word in ["yes", "confirm", "sure", "yeah"]):
-            await self.capability_worker.speak("Ok, cancelling.")
+        if confirmed:
+            await self.capability_worker.speak("Okay.")
             return True
         else:
-            await self.capability_worker.speak("Ok, continuing.")
+            await self.capability_worker.speak("Continuing.")
             return False
-
-
-# ============================================================================
-# TBD: Passive Polling Implementation
-# ============================================================================
-# TODO: Implement background polling for designated sender emails
-#
-# Architecture options (requires external scheduler or platform support):
-# 1. External cron job triggers this ability via OpenHome API every N minutes
-# 2. OpenHome platform adds background task support (future feature)
-# 3. User manually triggers "check mail" when expecting remote commands
-#
-# When implemented:
-# - Fetch new emails since last check
-# - If email from designated_sender:
-#   - Play "You've got mail" chime (if mail_notifications enabled)
-#   - Parse body as command via text_to_text_response()
-#   - Reply via email if response expected
-# - Store last checked email UID to avoid duplicate processing
-# ============================================================================

@@ -1,9 +1,24 @@
 {
     "unique_name": "proton-mail",
-    "matching_hotwords": ["send proton", "send protonmail"],
+    "matching_hotwords": [
+        "send proton",
+        "send protonmail",
+        "proton mail",
+        "check mail",
+        "read email",
+        "check my email",
+        "do i have mail",
+        "new email",
+        "any mail",
+        "inbox",
+        "compose email",
+        "write email",
+        "send email"
+    ],
     "smtp_password": "YOUR_PROTONMAIL_APP_PASSWORD",
     "proton_email": "your.email@protonmail.com",
     "designated_sender": "your-trigger@email.com",
+    "poll_interval_minutes": 10,
     "interactive_mode": true,
     "mail_notifications": true
 }
